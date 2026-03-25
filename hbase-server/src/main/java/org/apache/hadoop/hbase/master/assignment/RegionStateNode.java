@@ -17,10 +17,6 @@
  */
 package org.apache.hadoop.hbase.master.assignment;
 
-import java.util.Arrays;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
@@ -35,6 +31,11 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Current Region State. Most fields are synchronized with meta region, i.e, we will update meta
@@ -103,6 +104,12 @@ public class RegionStateNode implements Comparable<RegionStateNode> {
   private volatile long lastUpdate = 0;
 
   private volatile long openSeqNum = HConstants.NO_SEQNUM;
+
+  /**
+   * Exception message from the last FAILED_OPEN transition.
+   * This is used to provide debugging information about why a region failed to open.
+   */
+  private volatile String exceptionMessage = null;
 
   RegionStateNode(RegionInfo regionInfo, AtomicInteger activeTransitProcedureCount) {
     this.regionInfo = regionInfo;
@@ -266,6 +273,14 @@ public class RegionStateNode implements Comparable<RegionStateNode> {
     return openSeqNum;
   }
 
+  public String getExceptionMessage() {
+    return exceptionMessage;
+  }
+
+  public void setExceptionMessage(String exceptionMessage) {
+    this.exceptionMessage = exceptionMessage;
+  }
+
   public int getFormatVersion() {
     // we don't have any format for now
     // it should probably be in regionInfo.getFormatVersion()
@@ -273,7 +288,8 @@ public class RegionStateNode implements Comparable<RegionStateNode> {
   }
 
   public RegionState toRegionState() {
-    return new RegionState(getRegionInfo(), getState(), getLastUpdate(), getRegionLocation());
+    return new RegionState(getRegionInfo(), getState(), getLastUpdate(), getRegionLocation(),
+      0, getExceptionMessage());
   }
 
   @Override

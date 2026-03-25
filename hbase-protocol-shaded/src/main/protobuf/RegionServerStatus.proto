@@ -100,6 +100,9 @@ message RegionStateTransition {
 
   // Master active time as fencing token
   optional int64 initiating_master_active_time = 5;
+
+  /** Exception message for FAILED_OPEN transitions */
+  optional string exception_message = 6;
   enum TransitionCode {
     OPENED = 0;
     FAILED_OPEN = 1;

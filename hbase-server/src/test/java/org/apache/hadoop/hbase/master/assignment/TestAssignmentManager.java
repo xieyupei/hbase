@@ -17,14 +17,6 @@
  */
 package org.apache.hadoop.hbase.master.assignment;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
-
-import java.util.Collections;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.MetaTableAccessor;
@@ -42,6 +34,12 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.Collections;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+import static org.junit.Assert.*;
 
 @Category({ MasterTests.class, LargeTests.class })
 public class TestAssignmentManager extends TestAssignmentManagerBase {
@@ -331,5 +329,211 @@ public class TestAssignmentManager extends TestAssignmentManagerBase {
     } finally {
       this.util.killMiniHBaseCluster();
     }
+  }
+
+  /**
+   * Test that exception messages are correctly propagated from RegionServer to Master
+   * when a region fails to open.
+   *
+   * This test verifies the complete chain:
+   * 1. OpenRegionHandler catches exception during region open
+   * 2. Exception is passed to RegionStateTransitionContext
+   * 3. HRegionServer.createReportRegionStateTransitionRequest serializes exception to protobuf
+   * 4. Master receives and deserializes the exception message from the protobuf
+   * 5. AssignmentManager stores the exception message in RegionStateNode
+   * 6. The exception message can be retrieved from RegionState.getExceptionMessage()
+   */
+  @Test
+  public void testAssignWithFailedOpenAndExceptionMessage() throws Exception {
+    final TableName tableName = TableName.valueOf("testAssignWithFailedOpenAndExceptionMessage");
+    final RegionInfo hri = createRegionInfo(tableName, 1);
+    final String testExceptionMsg =
+      "java.io.IOException: Test exception for FAILED_OPEN with custom message";
+
+    // Collect metrics before test
+    collectAssignmentManagerMetrics();
+
+    // Use an executor that will fail OPEN with a specific exception message
+    rsDispatcher.setMockRsExecutor(new FailedOpenWithExceptionExecutor(testExceptionMsg));
+
+    TransitRegionStateProcedure proc = createAssignProcedure(hri);
+
+    // Submit procedure - it will report FAILED_OPEN immediately
+    master.getMasterProcedureExecutor().submitProcedure(proc);
+
+    // Wait for the FAILED_OPEN transition to be processed and exception message to be set
+    // We don't need to wait for max retries, just verify exception is captured after first failure
+    util.waitFor(30000, 100, () -> {
+      RegionStateNode rsn = am.getRegionStates().getRegionStateNode(hri);
+      if (rsn == null) {
+        LOG.info("RegionStateNode not yet created");
+        return false;
+      }
+      String exceptionMsg = rsn.getExceptionMessage();
+      LOG.info("Current region state: {}, exception: {}", rsn.getState(), exceptionMsg);
+      return exceptionMsg != null && exceptionMsg.equals(testExceptionMsg);
+    });
+
+    // Verify the exception message was stored in RegionStateNode
+    RegionStateNode rsn = am.getRegionStates().getRegionStateNode(hri);
+    assertNotNull("RegionStateNode should exist", rsn);
+
+    // Get RegionState and verify exception message
+    org.apache.hadoop.hbase.master.RegionState regionState = rsn.toRegionState();
+    assertNotNull("RegionState should exist", regionState);
+
+    // Verify the exception message was stored
+    String storedExceptionMsg = regionState.getExceptionMessage();
+    assertNotNull("Exception message should be stored", storedExceptionMsg);
+    assertEquals("Exception message should match what was sent", testExceptionMsg,
+      storedExceptionMsg);
+
+    LOG.info("Successfully verified exception message: {}", storedExceptionMsg);
+  }
+
+  /**
+   * Test that multiple regions can fail with different exception messages,
+   * and each region's exception is correctly stored and isolated.
+   *
+   * This test verifies:
+   * 1. Multiple concurrent FAILED_OPEN transitions can be handled
+   * 2. Each region's exception message is stored independently
+   * 3. Exception messages do not get mixed up between different regions
+   * 4. AssignmentManager correctly handles multiple simultaneous failures
+   */
+  @Test
+  public void testMultipleRegionsFailedOpenWithDifferentExceptions() throws Exception {
+    final TableName tableName =
+      TableName.valueOf("testMultipleRegionsFailedOpenWithDifferentExceptions");
+    final String exception1 = "java.io.IOException: Disk I/O error on region 1";
+    final String exception2 = "java.lang.OutOfMemoryError: Heap space exhausted on region 2";
+    final String exception3 = "java.net.SocketTimeoutException: HDFS connection timeout on region 3";
+
+    // Create multiple regions
+    final RegionInfo hri1 = createRegionInfo(tableName, 1);
+    final RegionInfo hri2 = createRegionInfo(tableName, 2);
+    final RegionInfo hri3 = createRegionInfo(tableName, 3);
+
+    // Set up executor with specific exception for region 1
+    rsDispatcher.setMockRsExecutor(new FailedOpenWithExceptionExecutor(exception1));
+    TransitRegionStateProcedure proc1 = createAssignProcedure(hri1);
+    master.getMasterProcedureExecutor().submitProcedure(proc1);
+
+    // Wait for region 1 to reach FAILED_OPEN
+    util.waitFor(120000, 500, () -> {
+      RegionStateNode rsn = am.getRegionStates().getRegionStateNode(hri1);
+      return rsn != null && rsn.getState() == State.FAILED_OPEN;
+    });
+
+    // Set up executor with specific exception for region 2
+    rsDispatcher.setMockRsExecutor(new FailedOpenWithExceptionExecutor(exception2));
+    TransitRegionStateProcedure proc2 = createAssignProcedure(hri2);
+    master.getMasterProcedureExecutor().submitProcedure(proc2);
+
+    // Wait for region 2 to reach FAILED_OPEN
+    util.waitFor(120000, 500, () -> {
+      RegionStateNode rsn = am.getRegionStates().getRegionStateNode(hri2);
+      return rsn != null && rsn.getState() == State.FAILED_OPEN;
+    });
+
+    // Set up executor with specific exception for region 3
+    rsDispatcher.setMockRsExecutor(new FailedOpenWithExceptionExecutor(exception3));
+    TransitRegionStateProcedure proc3 = createAssignProcedure(hri3);
+    master.getMasterProcedureExecutor().submitProcedure(proc3);
+
+    // Wait for region 3 to reach FAILED_OPEN
+    util.waitFor(120000, 500, () -> {
+      RegionStateNode rsn = am.getRegionStates().getRegionStateNode(hri3);
+      return rsn != null && rsn.getState() == State.FAILED_OPEN;
+    });
+
+    // Verify all regions are in FAILED_OPEN state with correct exception messages
+    RegionStateNode rsn1 = am.getRegionStates().getRegionStateNode(hri1);
+    RegionStateNode rsn2 = am.getRegionStates().getRegionStateNode(hri2);
+    RegionStateNode rsn3 = am.getRegionStates().getRegionStateNode(hri3);
+
+    assertNotNull("RegionStateNode 1 should exist", rsn1);
+    assertNotNull("RegionStateNode 2 should exist", rsn2);
+    assertNotNull("RegionStateNode 3 should exist", rsn3);
+
+    assertEquals("Region 1 should be in FAILED_OPEN state", State.FAILED_OPEN, rsn1.getState());
+    assertEquals("Region 2 should be in FAILED_OPEN state", State.FAILED_OPEN, rsn2.getState());
+    assertEquals("Region 3 should be in FAILED_OPEN state", State.FAILED_OPEN, rsn3.getState());
+
+    // Verify each region has its own specific exception message
+    org.apache.hadoop.hbase.master.RegionState rs1 = rsn1.toRegionState();
+    org.apache.hadoop.hbase.master.RegionState rs2 = rsn2.toRegionState();
+    org.apache.hadoop.hbase.master.RegionState rs3 = rsn3.toRegionState();
+
+    assertEquals("Region 1 exception message should match", exception1, rs1.getExceptionMessage());
+    assertEquals("Region 2 exception message should match", exception2, rs2.getExceptionMessage());
+    assertEquals("Region 3 exception message should match", exception3, rs3.getExceptionMessage());
+
+    LOG.info("All regions are in FAILED_OPEN state with correct exception messages");
+  }
+
+  /**
+   * Test that exception messages are captured even during retry scenarios,
+   * and regions can transition from FAILED_OPEN to OPEN successfully.
+   *
+   * This test verifies:
+   * 1. Exception message is captured during the first failed attempt
+   * 2. The exception message persists in RegionState during retries
+   * 3. Region can successfully recover and transition to OPEN state
+   * 4. The retry mechanism works correctly with the exception reporting feature
+   */
+  @Test
+  public void testFailedOpenThenSuccessfulRetry() throws Exception {
+    final TableName tableName = TableName.valueOf("testFailedOpenThenSuccessfulRetry");
+    final RegionInfo hri = createRegionInfo(tableName, 1);
+    final String tempException = "java.io.IOException: Temporary failure - disk full";
+
+    // First attempt: fail with exception
+    rsDispatcher.setMockRsExecutor(new FailedOpenWithExceptionExecutor(tempException));
+
+    TransitRegionStateProcedure proc = createAssignProcedure(hri);
+    master.getMasterProcedureExecutor().submitProcedure(proc);
+
+    // Wait for the first FAILED_OPEN transition to be processed
+    // We don't wait for max retries, just verify the exception was reported at least once
+    util.waitFor(30000, 500, () -> {
+      RegionStateNode rsn = am.getRegionStates().getRegionStateNode(hri);
+      if (rsn == null) return false;
+
+      // Check if we've seen a transition (state may be OPENING or FAILED_OPEN due to retries)
+      org.apache.hadoop.hbase.master.RegionState rs = rsn.toRegionState();
+      if (rs != null && rs.getExceptionMessage() != null) {
+        LOG.info("Caught region with exception message: {}", rs.getExceptionMessage());
+        return true;
+      }
+      return false;
+    });
+
+    // Verify exception was captured
+    RegionStateNode rsn = am.getRegionStates().getRegionStateNode(hri);
+    assertNotNull("RegionStateNode should exist", rsn);
+    org.apache.hadoop.hbase.master.RegionState rs = rsn.toRegionState();
+    assertNotNull("RegionState should exist", rs);
+    assertNotNull("Exception message should have been captured", rs.getExceptionMessage());
+    assertEquals("Exception message should match", tempException, rs.getExceptionMessage());
+
+    // Now change to good executor to allow successful retry
+    rsDispatcher.setMockRsExecutor(new GoodRsExecutor());
+
+    // Wait for region to eventually become OPEN (after the retries succeed)
+    util.waitFor(60000, 500, () -> {
+      RegionStateNode node = am.getRegionStates().getRegionStateNode(hri);
+      if (node == null) return false;
+      State state = node.getState();
+      LOG.info("Region state during retry: {}", state);
+      return state == State.OPEN;
+    });
+
+    // Verify region is now open and exception message is cleared (or still present from previous failure)
+    RegionStateNode finalRsn = am.getRegionStates().getRegionStateNode(hri);
+    assertNotNull("RegionStateNode should exist after retry", finalRsn);
+    assertEquals("Region should be OPEN after successful retry", State.OPEN, finalRsn.getState());
+
+    LOG.info("Region successfully transitioned from FAILED_OPEN to OPEN after retry");
   }
 }

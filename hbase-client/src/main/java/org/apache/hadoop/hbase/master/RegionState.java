@@ -17,15 +17,15 @@
  */
 package org.apache.hadoop.hbase.master;
 
-import java.util.Date;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.yetus.audience.InterfaceStability;
 
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos;
+import java.util.Date;
 
 /**
  * State of a Region while undergoing transitions. This class is immutable.
@@ -185,6 +185,8 @@ public class RegionState {
   private final State state;
   // The duration of region in transition
   private long ritDuration;
+  // Exception message for FAILED_OPEN state
+  private volatile String exceptionMessage;
 
   public static RegionState createForTesting(RegionInfo region, State state) {
     return new RegionState(region, state, EnvironmentEdgeManager.currentTime(), null);
@@ -200,11 +202,17 @@ public class RegionState {
 
   public RegionState(RegionInfo region, State state, long stamp, ServerName serverName,
     long ritDuration) {
+    this(region, state, stamp, serverName, ritDuration, null);
+  }
+
+  public RegionState(RegionInfo region, State state, long stamp, ServerName serverName,
+    long ritDuration, String exceptionMessage) {
     this.hri = region;
     this.state = state;
     this.stamp = stamp;
     this.serverName = serverName;
     this.ritDuration = ritDuration;
+    this.exceptionMessage = exceptionMessage;
   }
 
   public State getState() {
@@ -225,6 +233,14 @@ public class RegionState {
 
   public long getRitDuration() {
     return ritDuration;
+  }
+
+  public String getExceptionMessage() {
+    return exceptionMessage;
+  }
+
+  public void setExceptionMessage(String exceptionMessage) {
+    this.exceptionMessage = exceptionMessage;
   }
 
   /**

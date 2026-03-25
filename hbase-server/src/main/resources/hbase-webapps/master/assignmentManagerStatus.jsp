@@ -86,10 +86,14 @@ if (!rit.isEmpty()) {
                           } else if (rs.getState() ==  RegionState.State.FAILED_OPEN) {
                             retryStatus = "Failed";
                           }
+                          String stateInfo = RegionInfoDisplay.getDescriptiveNameFromRegionStateForDisplay(rs,
+                            assignmentManager.getConfiguration());
+                          if (rs.getExceptionMessage() != null) {
+                            stateInfo += " (Exception: " + rs.getExceptionMessage() + ")";
+                          }
                         %>
                         <td><%= rs.getRegion().getEncodedName() %></td><td>
-                        <%= RegionInfoDisplay.getDescriptiveNameFromRegionStateForDisplay(rs,
-                          assignmentManager.getConfiguration()) %></td>
+                        <%= stateInfo %></td>
                         <td><%= (currentTime - rs.getStamp()) %> </td>
                         <td> <%= retryStatus %> </td>
                      </tr>

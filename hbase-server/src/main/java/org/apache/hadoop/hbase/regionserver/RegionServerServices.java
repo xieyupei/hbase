@@ -18,12 +18,6 @@
 package org.apache.hadoop.hbase.regionserver;
 
 import com.google.protobuf.Service;
-import java.io.IOException;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map.Entry;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentMap;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.TableDescriptors;
@@ -41,10 +35,16 @@ import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequester;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
 import org.apache.hadoop.hbase.security.access.AccessChecker;
 import org.apache.hadoop.hbase.security.access.ZKPermissionWatcher;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.yetus.audience.InterfaceAudience;
 
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
+import java.io.IOException;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map.Entry;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * A curated subset of services provided by {@link HRegionServer}. For use internally only. Passed
@@ -130,24 +130,38 @@ public interface RegionServerServices extends Server, MutableOnlineRegions, Favo
     private final long masterSystemTime;
     private final long initiatingMasterActiveTime;
     private final long[] procIds;
+    private final Throwable exception;
     private final RegionInfo[] hris;
 
     public RegionStateTransitionContext(TransitionCode code, long openSeqNum, long masterSystemTime,
       long initiatingMasterActiveTime, RegionInfo... hris) {
+      this(code, openSeqNum, masterSystemTime, initiatingMasterActiveTime, null, hris);
+    }
+
+    public RegionStateTransitionContext(TransitionCode code, long openSeqNum, long procId,
+      long masterSystemTime, RegionInfo hri, long initiatingMasterActiveTime) {
+      this(code, openSeqNum, procId, masterSystemTime, null, hri, initiatingMasterActiveTime);
+    }
+
+    public RegionStateTransitionContext(TransitionCode code, long openSeqNum, long masterSystemTime,
+      long initiatingMasterActiveTime, Throwable exception, RegionInfo... hris) {
       this.code = code;
       this.openSeqNum = openSeqNum;
       this.masterSystemTime = masterSystemTime;
       this.initiatingMasterActiveTime = initiatingMasterActiveTime;
+      this.exception = exception;
       this.hris = hris;
       this.procIds = new long[hris.length];
     }
 
     public RegionStateTransitionContext(TransitionCode code, long openSeqNum, long procId,
-      long masterSystemTime, RegionInfo hri, long initiatingMasterActiveTime) {
+      long masterSystemTime, Throwable exception, RegionInfo hri,
+      long initiatingMasterActiveTime) {
       this.code = code;
       this.openSeqNum = openSeqNum;
       this.masterSystemTime = masterSystemTime;
       this.initiatingMasterActiveTime = initiatingMasterActiveTime;
+      this.exception = exception;
       this.hris = new RegionInfo[] { hri };
       this.procIds = new long[] { procId };
     }
@@ -174,6 +188,10 @@ public interface RegionServerServices extends Server, MutableOnlineRegions, Favo
 
     public long getInitiatingMasterActiveTime() {
       return initiatingMasterActiveTime;
+    }
+
+    public Throwable getException() {
+      return exception;
     }
   }
 

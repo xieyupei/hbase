@@ -17,10 +17,6 @@
  */
 package org.apache.hadoop.hbase.regionserver.handler;
 
-import static org.apache.hadoop.hbase.regionserver.CompactSplit.HBASE_REGION_SERVER_ENABLE_COMPACTION;
-
-import java.io.IOException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.client.RegionInfo;
@@ -33,12 +29,16 @@ import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices.PostOpenDeployContext;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices.RegionStateTransitionContext;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
 import org.apache.hadoop.hbase.util.CancelableProgressable;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
+import java.io.IOException;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static org.apache.hadoop.hbase.regionserver.CompactSplit.HBASE_REGION_SERVER_ENABLE_COMPACTION;
 
 /**
  * Handles opening of a region on a region server.
@@ -57,6 +57,8 @@ public class OpenRegionHandler extends EventHandler {
   private final RegionInfo regionInfo;
   private final TableDescriptor htd;
   private final long masterSystemTime;
+  // Store the exception that caused region open to fail
+  private Throwable failureException;
 
   public OpenRegionHandler(final Server server, final RegionServerServices rsServices,
     RegionInfo regionInfo, TableDescriptor htd, long masterSystemTime) {
@@ -166,9 +168,11 @@ public class OpenRegionHandler extends EventHandler {
         cleanupFailedOpen(region);
       }
     } finally {
+      // Report FAILED_OPEN with the exception that caused the failure
       rsServices
         .reportRegionStateTransition(new RegionStateTransitionContext(TransitionCode.FAILED_OPEN,
-          HConstants.NO_SEQNUM, Procedure.NO_PROC_ID, -1, regionInfo, -1));
+          HConstants.NO_SEQNUM, Procedure.NO_PROC_ID, masterSystemTime, this.failureException,
+          regionInfo, -1));
     }
   }
 
@@ -305,6 +309,8 @@ public class OpenRegionHandler extends EventHandler {
       // and transition the node back to FAILED_OPEN. If that fails,
       // we rely on the Timeout Monitor in the master to reassign.
       LOG.error("Failed open of region=" + this.regionInfo.getRegionNameAsString(), t);
+      // Store the exception so we can report it to master
+      this.failureException = t;
     }
     return region;
   }

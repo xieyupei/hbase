@@ -17,11 +17,11 @@
  */
 package org.apache.hadoop.hbase.master;
 
-import static org.junit.Assert.assertEquals;
-
 import org.apache.hadoop.hbase.HBaseClassTestRule;
 import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.junit.ClassRule;
@@ -30,7 +30,7 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
 
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos;
+import static org.junit.Assert.*;
 
 @Category({ MasterTests.class, SmallTests.class })
 public class TestRegionState {
@@ -57,5 +57,33 @@ public class TestRegionState {
     ClusterStatusProtos.RegionState protobuf2 = state1.convert();
     assertEquals("RegionState does not match " + state, state1, state2);
     assertEquals("Protobuf does not match " + state, protobuf1, protobuf2);
+  }
+
+  @Test
+  public void testExceptionMessage() {
+    // Test RegionState with no exception message
+    RegionState stateWithoutException =
+      new RegionState(new HRegionInfo(TableName.valueOf("table")), RegionState.State.FAILED_OPEN,
+        System.currentTimeMillis(), ServerName.valueOf("host1,16020,123456"), 0);
+    assertNull("Exception message should be null", stateWithoutException.getExceptionMessage());
+
+    // Test RegionState with exception message
+    String exceptionMsg = "java.io.IOException: Test exception message";
+    RegionState stateWithException =
+      new RegionState(new HRegionInfo(TableName.valueOf("table")), RegionState.State.FAILED_OPEN,
+        System.currentTimeMillis(), ServerName.valueOf("host1,16020,123456"), 0, exceptionMsg);
+    assertNotNull("Exception message should not be null", stateWithException.getExceptionMessage());
+    assertEquals("Exception message should match", exceptionMsg,
+      stateWithException.getExceptionMessage());
+
+    // Test setting exception message
+    RegionState state = RegionState.createForTesting(new HRegionInfo(TableName.valueOf("table")),
+      RegionState.State.FAILED_OPEN);
+    assertNull("Initial exception message should be null", state.getExceptionMessage());
+
+    String newExceptionMsg = "java.io.IOException: Another exception";
+    state.setExceptionMessage(newExceptionMsg);
+    assertEquals("Exception message should be updated", newExceptionMsg,
+      state.getExceptionMessage());
   }
 }

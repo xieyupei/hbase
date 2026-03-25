@@ -17,34 +17,8 @@
  */
 package org.apache.hadoop.hbase.master.assignment;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotEquals;
-
-import java.io.IOException;
-import java.io.InterruptedIOException;
-import java.io.UncheckedIOException;
-import java.net.SocketTimeoutException;
-import java.util.Arrays;
-import java.util.NavigableMap;
-import java.util.Set;
-import java.util.SortedSet;
-import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.ConcurrentSkipListSet;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.CallQueueTooBigException;
-import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.NotServingRegionException;
-import org.apache.hadoop.hbase.ServerMetricsBuilder;
-import org.apache.hadoop.hbase.ServerName;
-import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.YouAreDeadException;
+import org.apache.hadoop.hbase.*;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.ipc.CallTimeoutException;
@@ -60,10 +34,18 @@ import org.apache.hadoop.hbase.procedure2.ProcedureUtil;
 import org.apache.hadoop.hbase.procedure2.store.wal.WALProcedureStore;
 import org.apache.hadoop.hbase.regionserver.RegionServerAbortedException;
 import org.apache.hadoop.hbase.regionserver.RegionServerStoppedException;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.*;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.OpenRegionRequest.RegionOpenInfo;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.OpenRegionResponse.RegionOpeningState;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.ReportRegionStateTransitionRequest;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CommonFSUtils;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.ipc.RemoteException;
+import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -71,20 +53,17 @@ import org.junit.rules.TestName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.io.UncheckedIOException;
+import java.net.SocketTimeoutException;
+import java.util.Arrays;
+import java.util.NavigableMap;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.concurrent.*;
 
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.CloseRegionRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.CloseRegionResponse;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.ExecuteProceduresRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.ExecuteProceduresResponse;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.OpenRegionRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.OpenRegionRequest.RegionOpenInfo;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.OpenRegionResponse;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.OpenRegionResponse.RegionOpeningState;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.ReportRegionStateTransitionRequest;
+import static org.junit.Assert.*;
 
 /**
  * Base class for AM test.
@@ -692,5 +671,55 @@ public abstract class TestAssignmentManagerBase {
     openFailedCount = openProcMetrics.getFailedCounter().getCount();
     closeSubmittedCount = closeProcMetrics.getSubmittedCounter().getCount();
     closeFailedCount = closeProcMetrics.getFailedCounter().getCount();
+  }
+
+  /**
+   * Executor that simulates FAILED_OPEN with an exception message
+   */
+  protected class FailedOpenWithExceptionExecutor extends NoopRsExecutor {
+    private final String exceptionMessage;
+
+    public FailedOpenWithExceptionExecutor() {
+      this("java.io.IOException: Simulated region open failure for testing");
+    }
+
+    public FailedOpenWithExceptionExecutor(String exceptionMessage) {
+      this.exceptionMessage = exceptionMessage;
+    }
+
+    @Override
+    protected RegionOpeningState execOpenRegion(ServerName server, RegionOpenInfo openReq)
+      throws IOException {
+      RegionInfo hri = ProtobufUtil.toRegionInfo(openReq.getRegion());
+      LOG.info("Simulating FAILED_OPEN for region {} with exception: {}", hri.getRegionNameAsString(),
+        exceptionMessage);
+
+      // Send FAILED_OPEN transition with exception message
+      ReportRegionStateTransitionRequest.Builder req =
+        ReportRegionStateTransitionRequest.newBuilder();
+      req.setServer(ProtobufUtil.toServerName(server));
+      RegionStateTransition.Builder transition = RegionStateTransition.newBuilder();
+      transition.setTransitionCode(TransitionCode.FAILED_OPEN);
+      transition.addRegionInfo(openReq.getRegion());
+      transition.setExceptionMessage(exceptionMessage);
+      req.addTransition(transition.build());
+
+      try {
+        am.reportRegionStateTransition(req.build());
+      } catch (IOException e) {
+        LOG.warn("Failed to report FAILED_OPEN transition", e);
+        throw e;
+      }
+
+      return RegionOpeningState.FAILED_OPENING;
+    }
+
+    @Override
+    protected CloseRegionResponse execCloseRegion(ServerName server, byte[] regionName)
+      throws IOException {
+      RegionInfo hri = am.getRegionInfo(regionName);
+      sendTransitionReport(server, ProtobufUtil.toRegionInfo(hri), TransitionCode.CLOSED, -1);
+      return CloseRegionResponse.newBuilder().setClosed(true).build();
+    }
   }
 }
